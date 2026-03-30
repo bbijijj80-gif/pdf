@@ -1,143 +1,102 @@
 # HP LaserJet Network Scanner
 
-Программа для сканирования документов через сеть с HP LaserJet принтеров/сканеров.
+Modern multi-page PDF scanner for HP LaserJet printers with network scanning support.
 
-## Возможности
+## Features
 
-- ✅ Сетевое сканирование по IP адресу (протокол eSCL/AirScan)
-- ✅ Пошаговое сканирование: сканируйте страницы одну за другой
-- ✅ Drag-and-drop редактор: меняйте порядок страниц перетаскиванием
-- ✅ Выбор режима: цветной, черно-белый, оттенки серого
-- ✅ Настройка разрешения: 150, 200, 300, 600 DPI
-- ✅ Сохранение всех страниц в один PDF файл
-- ✅ Просмотр миниатюр отсканированных страниц
-- ✅ Удаление отдельных страниц
-- ✅ Логирование всех операций с подробными сообщениями об ошибках
-- ✅ Приложение не закрывается при ошибках - можно увидеть причину
+- ✅ **Network scanning** via eSCL/AirScan protocol (no SANE required)
+- ✅ **Step-by-step scanning**: Scan → place next page → Scan again → Finish
+- ✅ **Drag-and-drop editor**: Rearrange pages horizontally before saving
+- ✅ **Color mode selection**: Color, Grayscale, Black & White
+- ✅ **Resolution options**: 150, 200, 300, 600 DPI
+- ✅ **Multi-page PDF**: All pages saved in correct order in one file
+- ✅ **Error handling**: Terminal stays open to show detailed error messages
+- ✅ **Windows 10/11 compatible**: Works on modern Windows systems
 
-## Установка
+## Installation
 
-### 1. Установите Python 3.8 или новее
-
-Скачайте с https://www.python.org/downloads/
-
-### 2. Установите необходимые библиотеки
-
-Откройте командную строку (cmd) и выполните:
-
-```bash
-pip install requests Pillow img2pdf reportlab
-```
-
-Или из файла requirements.txt:
+### 1. Install Python dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Запуск программы
+Or manually:
+```bash
+pip install requests Pillow img2pdf
+```
+
+### 2. Find your scanner IP address
+
+- Check your printer's network settings
+- Or print a network configuration page from the printer menu
+- IP should look like: `192.168.1.100`
+
+## Usage
+
+### Run the program
 
 ```bash
 python hp_scanner.py
 ```
 
-Или создайте ярлык с командой:
-```
-pythonw.exe hp_scanner.py
-```
+### Scanning workflow
 
-## Использование
+1. **Enter scanner IP** in the top field
+2. Click **"Connect"** - wait for "Connected" status
+3. Select **Color mode** and **DPI** resolution
+4. Click **"📄 Scan Page"** 
+   - Place your document in the scanner
+   - Wait for scan to complete (~5-15 seconds)
+   - Thumbnail appears in preview area
+5. **Place next page** and click **"📄 Scan Page"** again
+6. Repeat step 5 for all pages
+7. Click **"✓ Finish & Edit"** when done scanning
+8. **Drag thumbnails** left/right to reorder pages if needed
+9. Click **"💾 Save as PDF"** and choose save location
 
-### Быстрый старт:
+## Troubleshooting
 
-1. **Введите IP адрес сканера** в поле "IP адрес сканера"
-   - Например: `192.168.1.100`
-   - Нажмите "Проверить связь" чтобы убедиться что сканер доступен
+### "Cannot connect to scanner"
+- Verify IP address is correct
+- Ensure scanner is powered on
+- Check network connection (ping the IP)
+- Make sure firewall allows HTTP traffic to scanner
 
-2. **Настройте параметры сканирования**:
-   - Режим: Color (цветной), Grayscale (оттенки серого), BlackWhite (ч/б)
-   - Разрешение: 300 DPI рекомендуется для документов
+### "Scan timeout" or white image
+- Some HP models use different eSCL paths
+- Try restarting the scanner
+- Check if scanner lid is closed properly
+- Verify paper is loaded in ADF (Automatic Document Feeder)
 
-3. **Отсканируйте первую страницу**:
-   - Положите документ в сканер
-   - Нажмите "📷 Сканировать страницу"
-   - Дождитесь завершения сканирования
+### Program freezes during scan
+- The scan process runs in a separate thread (won't freeze UI)
+- If stuck, check terminal for error messages
+- Terminal stays open so you can see full error details
 
-4. **Добавьте ещё страницы** (если нужно):
-   - Положите следующую страницу
-   - Снова нажмите "📷 Сканировать страницу"
-   - Повторяйте пока все страницы не будут отсканированы
+### Drag and drop not working smoothly
+- Click and hold on a thumbnail
+- Drag left or right to new position
+- Release mouse button to drop
+- Page numbers will update automatically
 
-5. **Измените порядок** (если нужно):
-   - Перетащите миниатюры мышкой для изменения порядка
-   - Удалите ненужные страницы кнопкой ✕
+## Technical Details
 
-6. **Сохраните результат**:
-   - Нажмите "✓ Завершить и перейти к редактору"
-   - Выберите место сохранения PDF файла
-   - Готово!
+- **Protocol**: eSCL (AirScan) over HTTP
+- **Image format**: PNG (converted to PDF)
+- **GUI**: Tkinter (built-in with Python)
+- **Threading**: Non-blocking scan operations
+- **Dependencies**: Modern libraries only (no deprecated packages)
 
-## Поиск IP адреса принтера
+## Supported Systems
 
-Если вы не знаете IP адрес вашего принтера:
+- Windows 10/11
+- Windows 7/8 (with Python 3.8+)
+- Linux (Ubuntu, Debian, etc.)
+- macOS (with Python 3.8+)
 
-1. Откройте веб-браузер
-2. Введите адрес вида `http://HP-printer.local` или посмотрите в настройках роутера
-3. Или распечатайте отчет о конфигурации сети с панели принтера
-4. IP обычно выглядит как `192.168.x.x` или `10.x.x.x`
+## Notes
 
-## Решение проблем
-
-### Ошибка "Не удаётся найти указанный путь"
-
-Причины:
-- Принтер выключен или не подключен к сети
-- Неверный IP адрес
-- Брандмауэр Windows блокирует соединение
-- Функция сетевого сканирования отключена в настройках принтера
-
-Решение:
-1. Проверьте что принтер включен и индикаторы горят
-2. Распечатайте отчет о сети с принтера для проверки IP
-3. Отключите брандмауэр на время тестирования
-4. В веб-интерфейсе принтера убедитесь что сканирование по сети включено
-
-### Белый экран вместо изображения
-
-Причины:
-- Сканер вернул пустые данные
-- Ошибка протокола связи
-
-Решение:
-1. Проверьте что в сканере есть бумага
-2. Нет замятия бумаги
-3. Попробуйте меньшее разрешение (150 или 200 DPI)
-4. Перезагрузите принтер
-
-### Программа требует установить saneutils
-
-Это сообщение для Linux. Для Windows установите библиотеки через pip:
-
-```bash
-pip install requests Pillow img2pdf reportlab
-```
-
-### Поддерживаемые модели
-
-Программа работает с HP LaserJet моделями поддерживающими:
-- Протокол eSCL (AirScan)
-- Сетевое сканирование через HTTP
-
-Большинство современных HP LaserJet Pro, MFP серий поддерживаются.
-
-## Технические детали
-
-- Язык: Python 3.8+
-- GUI: Tkinter (встроен в Python)
-- Сетевой протокол: HP eSCL / AirScan
-- Формат вывода: PDF
-- Платформа: Windows 10/11 (также работает на Linux/macOS)
-
-## Лицензия
-
-Свободное программное обеспечение для личного использования.
+- No SANE or additional drivers required
+- Works with most HP LaserJet Pro models with network scanning
+- For USB-connected scanners, use manufacturer software instead
