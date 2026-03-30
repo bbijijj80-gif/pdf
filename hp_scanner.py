@@ -3,18 +3,33 @@
 """
 Программа для сканирования документов с принтера/сканера HP LaserJet
 С возможностью сканирования нескольких страниц, перетаскивания и сохранения в PDF
+Версия с улучшенной обработкой ошибок
 """
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
+import sys
 import tempfile
 import threading
+import traceback
 from PIL import Image, ImageTk
 import fitz  # PyMuPDF
 import subprocess
 import shutil
 from pathlib import Path
+import logging
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('scanner_log.txt', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
 class ScannerApp:
@@ -23,9 +38,16 @@ class ScannerApp:
         self.root.title("Сканер документов HP LaserJet")
         self.root.geometry("1200x800")
         
+        # Обработка ошибок главного окна
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        
         # Хранилище отсканированных страниц
         self.scanned_pages = []  # Список словарей: {'image': PIL.Image, 'photo': PhotoImage, 'path': str}
         self.page_counter = 0
+        
+        # Переменные для drag-and-drop
+        self._drag_start_x = 0
+        self._drag_index = None
         
         # Настройки сканирования
         self.resolution = tk.StringVar(value="300")
@@ -34,6 +56,7 @@ class ScannerApp:
         self.scan_source = tk.StringVar(value="Flatbed")
         
         self.setup_ui()
+        logger.info("Приложение запущено")
         
     def setup_ui(self):
         """Создание пользовательского интерфейса"""
@@ -162,19 +185,25 @@ class ScannerApp:
     def _do_scan(self, is_batch=False):
         """Выполнение сканирования в фоновом потоке"""
         try:
+            logger.debug(f"Начало сканирования (batch={is_batch})")
             # Попытка использовать scanimage (SANE)
             scanned_image = self._scan_with_scanimage()
             
             if scanned_image:
+                logger.info("Сканирование успешно через scanimage")
                 self.root.after(0, lambda: self._add_scanned_page(scanned_image))
                 self.root.after(0, lambda: self.status_var.set("Страница отсканирована успешно"))
             else:
                 # Если scanimage не доступен, создаем тестовое изображение
+                logger.info("Scanimage не найден, создаем тестовую страницу")
                 self.root.after(0, lambda: self._create_test_page())
                 self.root.after(0, lambda: self.status_var.set("Создана тестовая страница (сканер не найден)"))
                 
         except Exception as e:
-            self.root.after(0, lambda: self.status_var.set(f"Ошибка сканирования: {str(e)}"))
+            logger.error(f"Ошибка сканирования: {e}")
+            traceback.print_exc()
+            error_msg = f"Ошибка сканирования: {str(e)}"
+            self.root.after(0, lambda: self.status_var.set(error_msg))
             if not is_batch:
                 self.root.after(0, lambda: self.scan_btn.config(state=tk.NORMAL))
             else:
@@ -187,14 +216,24 @@ class ScannerApp:
     
     def _do_multiple_scan(self, num_pages):
         """Сканирование нескольких страниц"""
-        for i in range(num_pages):
-            self.root.after(0, lambda p=i+1: self.status_var.set(f"Сканирование страницы {p}/{num_pages}..."))
-            self._do_scan(is_batch=True)
-            # Небольшая задержка между сканированиями
-            import time
-            time.sleep(0.5)
-        
-        self.root.after(0, lambda: self.status_var.set(f"Отсканировано {num_pages} страниц"))
+        try:
+            logger.info(f"Начало массового сканирования: {num_pages} страниц")
+            for i in range(num_pages):
+                page_num = i + 1
+                logger.debug(f"Сканирование страницы {page_num}/{num_pages}")
+                self.root.after(0, lambda p=page_num: self.status_var.set(f"Сканирование страницы {p}/{num_pages}..."))
+                self._do_scan(is_batch=True)
+                # Небольшая задержка между сканированиями
+                import time
+                time.sleep(0.5)
+            
+            self.root.after(0, lambda: self.status_var.set(f"Отсканировано {num_pages} страниц"))
+            logger.info(f"Массовое сканирование завершено: {num_pages} страниц")
+        except Exception as e:
+            logger.error(f"Ошибка массового сканирования: {e}")
+            traceback.print_exc()
+            self.root.after(0, lambda: self.status_var.set(f"Ошибка массового сканирования: {str(e)}"))
+            self.root.after(0, lambda: self.scan_multiple_btn.config(state=tk.NORMAL))
     
     def _scan_with_scanimage(self):
         """Попытка сканирования через scanimage (SANE backend)"""
@@ -352,29 +391,46 @@ class ScannerApp:
     
     def _on_drag_start(self, event, index):
         """Начало перетаскивания"""
-        widget = event.widget
-        self._drag_start_x = event.x_root
-        self._drag_index = index
-        widget.winfo_toplevel().attributes('-alpha', 0.5)
+        try:
+            widget = event.widget
+            self._drag_start_x = event.x_root
+            self._drag_index = index
+            toplevel = widget.winfo_toplevel()
+            if toplevel:
+                toplevel.attributes('-alpha', 0.5)
+            logger.debug(f"Drag started for index {index}")
+        except Exception as e:
+            logger.error(f"Ошибка при начале перетаскивания: {e}")
+            traceback.print_exc()
     
     def _on_drag_motion(self, event, index):
         """Перемещение при перетаскивании"""
-        widget = self.scanned_pages[index]['frame']
-        x = widget.winfo_x() + event.x_root - self._drag_start_x
-        widget.place(x=x, y=widget.winfo_y())
+        try:
+            widget = self.scanned_pages[index]['frame']
+            x = widget.winfo_x() + event.x_root - self._drag_start_x
+            widget.place(x=x, y=widget.winfo_y())
+        except Exception as e:
+            logger.error(f"Ошибка при перемещении: {e}")
+            traceback.print_exc()
     
     def _on_drag_release(self, event, target_index=None):
         """Завершение перетаскивания"""
-        # Восстанавливаем прозрачность
-        for page in self.scanned_pages:
-            page['frame'].winfo_toplevel().attributes('-alpha', 1.0)
-        
-        # Определяем новую позицию
-        current_x = event.x_root
-        new_index = self._find_new_index(current_x)
-        
-        if new_index is not None and new_index != self._drag_index:
-            self._reorder_pages(self._drag_index, new_index)
+        try:
+            # Восстанавливаем прозрачность
+            for page in self.scanned_pages:
+                toplevel = page['frame'].winfo_toplevel()
+                if toplevel:
+                    toplevel.attributes('-alpha', 1.0)
+            
+            # Определяем новую позицию
+            current_x = event.x_root
+            new_index = self._find_new_index(current_x)
+            
+            if new_index is not None and new_index != self._drag_index:
+                self._reorder_pages(self._drag_index, new_index)
+        except Exception as e:
+            logger.error(f"Ошибка при завершении перетаскивания: {e}")
+            traceback.print_exc()
     
     def _find_new_index(self, x_coord):
         """Определение нового индекса на основе позиции"""
@@ -457,22 +513,53 @@ class ScannerApp:
     
     def clear_all(self):
         """Очистка всех страниц"""
-        if not self.scanned_pages:
-            return
-        
-        if messagebox.askyesno("Подтверждение", "Удалить все отсканированные страницы?"):
-            for page in self.scanned_pages:
-                try:
-                    os.unlink(page['path'])
-                    os.rmdir(os.path.dirname(page['path']))
-                except:
-                    pass
-                page['frame'].destroy()
+        try:
+            if not self.scanned_pages:
+                return
             
-            self.scanned_pages = []
-            self.page_counter = 0
-            self.info_label.config(text="Страниц: 0")
-            self.status_var.set("Все страницы удалены")
+            if messagebox.askyesno("Подтверждение", "Удалить все отсканированные страницы?"):
+                for page in self.scanned_pages:
+                    try:
+                        os.unlink(page['path'])
+                        os.rmdir(os.path.dirname(page['path']))
+                    except:
+                        pass
+                    page['frame'].destroy()
+                
+                self.scanned_pages = []
+                self.page_counter = 0
+                self.info_label.config(text="Страниц: 0")
+                self.status_var.set("Все страницы удалены")
+        except Exception as e:
+            logger.error(f"Ошибка при очистке: {e}")
+            traceback.print_exc()
+            messagebox.showerror("Ошибка", f"Не удалось очистить страницы: {str(e)}")
+
+    def _on_closing(self):
+        """Обработка закрытия окна"""
+        try:
+            if self.scanned_pages:
+                if messagebox.askyesno("Выход", "Закрыть программу? Все не сохраненные страницы будут потеряны."):
+                    self._cleanup_temp_files()
+                    self.root.destroy()
+            else:
+                self.root.destroy()
+        except Exception as e:
+            logger.error(f"Ошибка при закрытии: {e}")
+            traceback.print_exc()
+            self.root.destroy()
+
+    def _cleanup_temp_files(self):
+        """Очистка временных файлов"""
+        for page in self.scanned_pages:
+            try:
+                if 'path' in page and os.path.exists(page['path']):
+                    os.unlink(page['path'])
+                    dir_path = os.path.dirname(page['path'])
+                    if os.path.exists(dir_path) and not os.listdir(dir_path):
+                        os.rmdir(dir_path)
+            except Exception as e:
+                logger.warning(f"Не удалось удалить временный файл {page.get('path', 'unknown')}: {e}")
     
     def save_as_separate(self):
         """Сохранение каждой страницы как отдельный PDF"""
@@ -678,14 +765,33 @@ class MultipleScanDialog:
 
 
 def main():
-    root = tk.Tk()
-    
-    # Установка стиля
-    style = ttk.Style()
-    style.theme_use('clam')
-    
-    app = ScannerApp(root)
-    root.mainloop()
+    try:
+        logger.info("Запуск приложения сканера")
+        root = tk.Tk()
+        
+        # Обработка глобальных исключений
+        def handle_exception(exc_type, exc_value, exc_traceback):
+            if issubclass(exc_type, KeyboardInterrupt):
+                sys.__excepthook__(exc_type, exc_value, exc_traceback)
+                return
+            logger.critical("Необработанное исключение", exc_info=(exc_type, exc_value, exc_traceback))
+            traceback.print_exception(exc_type, exc_value, exc_traceback)
+            messagebox.showerror("Критическая ошибка", f"Произошла непредвиденная ошибка:\n{str(exc_value)}\n\nПодробности в файле scanner_log.txt")
+        
+        sys.excepthook = handle_exception
+        
+        # Установка стиля
+        style = ttk.Style()
+        style.theme_use('clam')
+        
+        app = ScannerApp(root)
+        logger.info("Приложение готово к работе")
+        root.mainloop()
+    except Exception as e:
+        logger.critical(f"Критическая ошибка при запуске: {e}")
+        traceback.print_exc()
+        print(f"Критическая ошибка: {e}")
+        print("Подробности в файле scanner_log.txt")
 
 
 if __name__ == "__main__":
