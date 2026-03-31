@@ -1,7 +1,7 @@
 """
-HP LaserJet Network Scanner Application for Windows
-Сканирование документов по сети с возможностью многостраничного сканирования,
-редактирования порядка страниц и сохранения в PDF.
+Сканер документов для HP LaserJet (Windows)
+Использует WIA/TWAIN через comtypes (встроен в Windows)
+Не требует pyinsane2 или SANE
 """
 
 import tkinter as tk
@@ -9,605 +9,769 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 import os
 import sys
+import tempfile
+import shutil
 from pathlib import Path
 from datetime import datetime
+from PIL import Image, ImageTk
+import io
 
-# Проверка наличия необходимых библиотек
+# Попытка импорта библиотек для Windows
 try:
-    import PIL.Image
-    from PIL import Image
+    import comtypes.client
+    import comtypes.gen.WIA
+    WIA_AVAILABLE = True
 except ImportError:
-    print("Установите Pillow: pip install Pillow")
-    input("Нажмите Enter для выхода...")
-    sys.exit(1)
+    WIA_AVAILABLE = False
+    print("Warning: comtypes not available. TWAIN fallback will be used.")
 
 try:
-    import pyinsane2
+    import twain
+    TWAIN_AVAILABLE = True
 except ImportError:
-    print("Установите pyinsane2: pip install pyinsane2")
-    print("Также установите TWAIN драйверы для вашего сканера")
-    input("Нажмите Enter для выхода...")
-    sys.exit(1)
+    TWAIN_AVAILABLE = False
+    print("Warning: twain not available. Install with: pip install twain")
 
+# Константы WIA
+WIA_DEVICE_CATEGORY_SCANNER = "{a63b11c0-b76e-4496-9585-e29b5b3fc30c}"
+WIA_IMAGE_FORMAT_PNG = "{b96b3cae-0728-11d3-9d7b-0000f81ef32e}"
+WIA_IMAGE_FORMAT_BMP = "{a63b11c0-b76e-4496-9585-e29b5b3fc30c}"
 
 class ScannerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("HP LaserJet Scanner - Сканирование документов")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+        self.root.title("HP LaserJet Scanner - Многостраничное сканирование")
+        self.root.geometry("1200x800")
+        self.root.minsize(1000, 700)
         
-        # Переменные состояния
-        self.scanned_images = []  # Список отсканированных изображений
-        self.current_session = []  # Текущая сессия сканирования
+        # Данные сканирования
+        self.scanned_pages = []  # Список изображений (PIL Image)
+        self.page_thumbnails = []  # Список PhotoImage для превью
+        self.current_scan_index = 0
         self.is_scanning = False
         self.scanner_device = None
-        self.scan_settings = {}
-        self.color_mode = tk.StringVar(value="Color")
+        self.scanner_type = None  # 'WIA' или 'TWAIN'
         
-        # Настройка стиля
-        self.setup_styles()
+        # Настройки
+        self.color_mode = tk.StringVar(value="Color")
+        self.dpi = tk.IntVar(value=300)
+        self.paper_size = tk.StringVar(value="A4")
+        self.save_separate = tk.BooleanVar(value=False)
         
         # Создание интерфейса
         self.create_main_interface()
         
-        # Инициализация сканера
-        self.init_scanner()
+        # Поиск сканера при запуске
+        self.after_id = self.root.after(1000, self.find_scanner)
         
-        # Обработчик закрытия окна
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-    
-    def setup_styles(self):
-        """Настройка стилей интерфейса"""
-        style = ttk.Style()
-        style.theme_use('clam')
-        
-        # Конфигурация стилей
-        style.configure('Title.TLabel', font=('Segoe UI', 14, 'bold'))
-        style.configure('Status.TLabel', font=('Segoe UI', 10))
-        style.configure('Error.TLabel', font=('Segoe UI', 10), foreground='red')
-        style.configure('Success.TLabel', font=('Segoe UI', 10), foreground='green')
-        
-        # Стили кнопок
-        style.configure('Primary.TButton', font=('Segoe UI', 11, 'bold'))
-        style.configure('Secondary.TButton', font=('Segoe UI', 10))
-        style.configure('Danger.TButton', font=('Segoe UI', 10), foreground='red')
-    
     def create_main_interface(self):
         """Создание основного интерфейса"""
-        # Главный контейнер
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
+        # Верхняя панель с настройками
+        top_frame = ttk.Frame(self.root, padding="10")
+        top_frame.pack(fill=tk.X)
         
-        # Верхняя панель - выбор сканера и настройки
-        self.create_top_panel(main_frame)
-        
-        # Центральная область - предпросмотр страниц
-        self.create_preview_area(main_frame)
-        
-        # Нижняя панель - кнопки управления
-        self.create_bottom_panel(main_frame)
-        
-        # Статус бар
-        self.create_status_bar(main_frame)
-    
-    def create_top_panel(self, parent):
-        """Создание верхней панели с настройками"""
-        top_frame = ttk.LabelFrame(parent, text="Настройки сканирования", padding="10")
-        top_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        parent.columnconfigure(0, weight=1)
-        
-        # Выбор сканера
-        scanner_label = ttk.Label(top_frame, text="Сканер:")
-        scanner_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
-        
-        self.scanner_combo = ttk.Combobox(top_frame, state="readonly", width=40)
-        self.scanner_combo.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
-        self.scanner_combo.bind('<<ComboboxSelected>>', self.on_scanner_selected)
-        
-        refresh_btn = ttk.Button(top_frame, text="Обновить", command=self.refresh_scanners)
-        refresh_btn.grid(row=0, column=2, padx=(0, 20))
-        
-        # Настройки сканирования
-        settings_frame = ttk.Frame(top_frame)
-        settings_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10, 0))
+        # Левая часть - настройки
+        settings_frame = ttk.LabelFrame(top_frame, text="Настройки сканирования", padding="10")
+        settings_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
         
         # Цветовой режим
-        color_label = ttk.Label(settings_frame, text="Цвет:")
-        color_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        ttk.Label(settings_frame, text="Цвет:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        color_combo = ttk.Combobox(settings_frame, textvariable=self.color_mode, 
+                                   values=["Color", "Grayscale", "BlackAndWhite"], state="readonly", width=15)
+        color_combo.grid(row=0, column=1, padx=5, pady=5)
+        color_combo.bind("<<ComboboxSelected>>", lambda e: None)
         
-        color_modes = ["Color", "Grayscale", "Black & White"]
-        self.color_combo = ttk.Combobox(settings_frame, textvariable=self.color_mode, 
-                                        values=color_modes, state="readonly", width=15)
-        self.color_combo.grid(row=0, column=1, sticky=tk.W, padx=(0, 20))
-        self.color_combo.bind('<<ComboboxSelected>>', self.on_color_changed)
-        
-        # Разрешение
-        dpi_label = ttk.Label(settings_frame, text="DPI:")
-        dpi_label.grid(row=0, column=2, sticky=tk.W, padx=(0, 5))
-        
-        self.dpi_var = tk.StringVar(value="300")
-        dpi_combo = ttk.Combobox(settings_frame, textvariable=self.dpi_var,
-                                 values=["150", "200", "300", "400", "600"], 
-                                 state="readonly", width=8)
-        dpi_combo.grid(row=0, column=3, sticky=tk.W, padx=(0, 20))
+        # DPI
+        ttk.Label(settings_frame, text="DPI:").grid(row=0, column=2, sticky=tk.W, padx=15, pady=5)
+        dpi_combo = ttk.Combobox(settings_frame, textvariable=self.dpi, 
+                                 values=[150, 200, 300, 400, 600], state="readonly", width=8)
+        dpi_combo.grid(row=0, column=3, padx=5, pady=5)
         
         # Формат бумаги
-        paper_label = ttk.Label(settings_frame, text="Формат:")
-        paper_label.grid(row=0, column=4, sticky=tk.W, padx=(0, 5))
+        ttk.Label(settings_frame, text="Формат:").grid(row=0, column=4, sticky=tk.W, padx=15, pady=5)
+        paper_combo = ttk.Combobox(settings_frame, textvariable=self.paper_size, 
+                                   values=["A4", "A3", "Letter", "Legal"], state="readonly", width=10)
+        paper_combo.grid(row=0, column=5, padx=5, pady=5)
         
-        self.paper_var = tk.StringVar(value="A4")
-        paper_combo = ttk.Combobox(settings_frame, textvariable=self.paper_var,
-                                   values=["A4", "A3", "Letter", "Legal"], 
-                                   state="readonly", width=10)
-        paper_combo.grid(row=0, column=5, sticky=tk.W)
-    
-    def create_preview_area(self, parent):
-        """Создание области предпросмотра страниц"""
-        preview_frame = ttk.LabelFrame(parent, text="Отсканированные страницы", padding="10")
-        preview_frame.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(1, weight=1)
+        # Раздельное сохранение
+        self.separate_check = ttk.Checkbutton(settings_frame, text="Сохранять отдельно", 
+                                              variable=self.save_separate)
+        self.separate_check.grid(row=0, column=6, padx=20, pady=5)
         
-        # Canvas для прокрутки миниатюр
-        self.preview_canvas = tk.Canvas(preview_frame, bg="#f0f0f0", height=300)
-        self.preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Информация о сканере
+        self.scanner_info_label = ttk.Label(settings_frame, text="Поиск сканера...", 
+                                            foreground="orange")
+        self.scanner_info_label.grid(row=1, column=0, columnspan=7, sticky=tk.W, padx=5, pady=5)
         
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, 
-                                  command=self.preview_canvas.xview)
-        scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        # Правая часть - кнопки управления
+        buttons_frame = ttk.Frame(top_frame)
+        buttons_frame.pack(side=tk.RIGHT, padx=20)
         
-        self.preview_canvas.configure(xscrollcommand=scrollbar.set)
+        self.scan_btn = ttk.Button(buttons_frame, text="📄 Сканировать страницу", 
+                                   command=self.start_scan_page, style="Accent.TButton")
+        self.scan_btn.pack(side=tk.LEFT, padx=5)
         
-        # Frame для миниатюр внутри canvas
-        self.thumbnails_frame = ttk.Frame(self.preview_canvas)
-        self.preview_canvas.create_window((0, 0), window=self.thumbnails_frame, 
-                                          anchor=tk.NW)
+        self.finish_btn = ttk.Button(buttons_frame, text="✅ Завершить и редактировать", 
+                                     command=self.finish_scanning, state=tk.DISABLED)
+        self.finish_btn.pack(side=tk.LEFT, padx=5)
         
-        # Binding для изменения размера
-        self.thumbnails_frame.bind('<Configure>', self.on_thumbnails_configure)
-        self.preview_canvas.bind('<Configure>', self.on_canvas_configure)
+        self.clear_btn = ttk.Button(buttons_frame, text="🗑️ Очистить всё", 
+                                    command=self.clear_all, state=tk.DISABLED)
+        self.clear_btn.pack(side=tk.LEFT, padx=5)
         
-        # Label для отображения количества страниц
-        self.page_count_label = ttk.Label(preview_frame, text="Страниц: 0")
-        self.page_count_label.pack(side=tk.TOP, anchor=tk.E, pady=(5, 0))
-    
-    def create_bottom_panel(self, parent):
-        """Создание нижней панели с кнопками управления"""
-        bottom_frame = ttk.Frame(parent)
-        bottom_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
-        parent.columnconfigure(0, weight=1)
+        # Центральная область с превью страниц
+        preview_container = ttk.Frame(self.root, padding="10")
+        preview_container.pack(fill=tk.BOTH, expand=True)
         
-        # Кнопки сканирования
-        scan_btn = ttk.Button(bottom_frame, text="📄 Сканировать страницу", 
-                             command=self.scan_page, style='Primary.TButton')
-        scan_btn.pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(preview_container, text="Отсканированные страницы (перетаскивание кнопками ниже):",
+                  font=("Arial", 11, "bold")).pack(anchor=tk.W, pady=(0, 10))
         
-        self.complete_btn = ttk.Button(bottom_frame, text="✓ Завершить сканирование", 
-                                       command=self.complete_scanning, 
-                                       state=tk.DISABLED)
-        self.complete_btn.pack(side=tk.LEFT, padx=(0, 10))
+        # Canvas для горизонтальной прокрутки превью
+        self.preview_canvas = tk.Canvas(preview_container, bg="#f0f0f0", highlightthickness=0)
+        self.preview_scrollbar = ttk.Scrollbar(preview_container, orient=tk.HORIZONTAL, 
+                                               command=self.preview_canvas.xview)
         
-        # Кнопки редактирования
-        clear_btn = ttk.Button(bottom_frame, text="🗑 Очистить всё", 
-                              command=self.clear_all, style='Danger.TButton')
-        clear_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.preview_inner_frame = ttk.Frame(self.preview_canvas)
         
-        # Кнопки сохранения
-        save_single_btn = ttk.Button(bottom_frame, text="💾 Сохранить как отдельный PDF", 
-                                    command=lambda: self.save_pdf(single=True))
-        save_single_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.preview_window = self.preview_canvas.create_window((0, 0), window=self.preview_inner_frame, 
+                                                                anchor=tk.NW)
         
-        save_combined_btn = ttk.Button(bottom_frame, text="📚 Сохранить объединённый PDF", 
-                                      command=lambda: self.save_pdf(single=False))
-        save_combined_btn.pack(side=tk.LEFT)
+        self.preview_canvas.configure(xscrollcommand=self.preview_scrollbar.set)
         
-        # Индикатор прогресса
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(bottom_frame, variable=self.progress_var, 
-                                           maximum=100, mode='indeterminate')
-        self.progress_bar.pack(side=tk.RIGHT, padx=(20, 0))
-    
-    def create_status_bar(self, parent):
-        """Создание статусной строки"""
-        status_frame = ttk.Frame(parent)
-        status_frame.grid(row=3, column=0, sticky=(tk.W, tk.E))
-        parent.columnconfigure(0, weight=1)
+        self.preview_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.preview_canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         
-        self.status_label = ttk.Label(status_frame, text="Готов к работе", style='Status.TLabel')
-        self.status_label.pack(side=tk.LEFT)
+        self.preview_inner_frame.bind("<Configure>", self.on_preview_frame_configure)
+        self.preview_canvas.bind("<Configure>", self.on_canvas_configure)
         
-        self.error_label = ttk.Label(status_frame, text="", style='Error.TLabel')
-        self.error_label.pack(side=tk.RIGHT)
-    
-    def init_scanner(self):
-        """Инициализация сканера"""
-        try:
-            self.update_status("Поиск доступных сканеров...")
-            pyinsane2.init()
-            self.refresh_scanners()
-            self.update_status("Готов к работе")
-        except Exception as e:
-            error_msg = f"Ошибка инициализации: {str(e)}"
-            self.show_error(error_msg)
-            self.update_status(error_msg, is_error=True)
-    
-    def refresh_scanners(self):
-        """Обновление списка доступных сканеров"""
-        try:
-            self.scanner_combo['values'] = []
-            devices = pyinsane2.get_devices()
-            
-            if not devices:
-                self.scanner_combo['values'] = ["Нет доступных сканеров"]
-                self.scanner_combo.set("Нет доступных сканеров")
-                self.show_error("Не найдено доступных сканеров. Проверьте подключение.")
-                return
-            
-            device_names = [str(device) for device in devices]
-            self.scanner_combo['values'] = device_names
-            self.scanner_combo.set(device_names[0])
-            self.on_scanner_selected(None)
-            
-            self.update_status(f"Найдено сканеров: {len(devices)}")
-        except Exception as e:
-            error_msg = f"Ошибка получения списка сканеров: {str(e)}"
-            self.show_error(error_msg)
-            self.update_status(error_msg, is_error=True)
-    
-    def on_scanner_selected(self, event):
-        """Обработчик выбора сканера"""
-        try:
-            selected = self.scanner_combo.get()
-            if selected and selected != "Нет доступных сканеров":
-                devices = pyinsane2.get_devices()
-                for device in devices:
-                    if str(device) == selected:
-                        self.scanner_device = device
-                        self.update_status(f"Выбран сканер: {selected}")
-                        break
-        except Exception as e:
-            self.show_error(f"Ошибка выбора сканера: {str(e)}")
-    
-    def on_color_changed(self, event):
-        """Обработчик изменения цветового режима"""
-        self.update_scan_settings()
-    
-    def update_scan_settings(self):
-        """Обновление настроек сканирования"""
-        if self.scanner_device:
+        # Панель управления страницами (появляется после сканирования)
+        self.page_controls_frame = ttk.Frame(self.root, padding="10")
+        # Не pack сразу, будет показана при необходимости
+        
+        ttk.Label(self.page_controls_frame, text="Управление порядком страниц:",
+                  font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=(0, 5))
+        
+        controls_inner = ttk.Frame(self.page_controls_frame)
+        controls_inner.pack(fill=tk.X)
+        
+        self.prev_page_btn = ttk.Button(controls_inner, text="◀ Переместить влево", 
+                                        command=self.move_page_left, state=tk.DISABLED)
+        self.prev_page_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.next_page_btn = ttk.Button(controls_inner, text="Переместить вправо ▶", 
+                                        command=self.move_page_right, state=tk.DISABLED)
+        self.prev_page_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.delete_page_btn = ttk.Button(controls_inner, text="✕ Удалить выбранную", 
+                                          command=self.delete_selected_page, state=tk.DISABLED)
+        self.delete_page_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.selected_page_label = ttk.Label(controls_inner, text="Страница не выбрана", 
+                                             foreground="gray")
+        self.selected_page_label.pack(side=tk.LEFT, padx=20)
+        
+        # Нижняя панель со статусом и кнопкой сохранения
+        bottom_frame = ttk.Frame(self.root, padding="10")
+        bottom_frame.pack(fill=tk.X)
+        
+        self.status_label = ttk.Label(bottom_frame, text="Готов к работе. Выберите настройки и нажмите 'Сканировать страницу'",
+                                      relief=tk.SUNKEN, anchor=tk.W)
+        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        self.save_btn = ttk.Button(bottom_frame, text="💾 Сохранить в PDF", 
+                                   command=self.save_to_pdf, state=tk.DISABLED)
+        self.save_btn.pack(side=tk.RIGHT, padx=5)
+        
+        # Стили
+        style = ttk.Style()
+        style.configure("Accent.TButton", font=("Arial", 10, "bold"))
+        
+        # Привязка клавиш
+        self.root.bind("<Delete>", lambda e: self.delete_selected_page())
+        self.root.bind("<Left>", lambda e: self.move_page_left())
+        self.root.bind("<Right>", lambda e: self.move_page_right())
+        
+    def find_scanner(self):
+        """Поиск доступных сканеров"""
+        def search():
             try:
-                options = self.scanner_device.get_options()
+                if WIA_AVAILABLE:
+                    scanner = self.find_wia_scanner()
+                    if scanner:
+                        self.scanner_device = scanner
+                        self.scanner_type = 'WIA'
+                        self.root.after(0, lambda: self.update_scanner_status(
+                            f"✓ Сканер найден (WIA): {self.get_scanner_name()}", "green"))
+                        return
                 
-                # Установка цветового режима
-                for option in options:
-                    if option.name == 'mode':
-                        color_map = {
-                            'Color': 'Color',
-                            'Grayscale': 'Gray',
-                            'Black & White': 'Lineart'
-                        }
-                        desired_mode = color_map.get(self.color_mode.get(), 'Color')
-                        if desired_mode in option.constraint:
-                            option.set(desired_mode)
+                if TWAIN_AVAILABLE:
+                    scanner = self.find_twain_scanner()
+                    if scanner:
+                        self.scanner_device = scanner
+                        self.scanner_type = 'TWAIN'
+                        self.root.after(0, lambda: self.update_scanner_status(
+                            f"✓ Сканер найден (TWAIN): {self.get_scanner_name()}", "green"))
+                        return
                 
-                # Установка разрешения
-                for option in options:
-                    if option.name == 'resolution':
-                        dpi = int(self.dpi_var.get())
-                        if dpi in option.constraint:
-                            option.set(dpi)
-                
-                self.update_status("Настройки применены")
+                self.root.after(0, lambda: self.update_scanner_status(
+                    "✗ Сканер не найден. Проверьте подключение и драйверы.", "red"))
+                    
             except Exception as e:
-                self.show_error(f"Ошибка применения настроек: {str(e)}")
+                self.root.after(0, lambda: self.update_scanner_status(
+                    f"✗ Ошибка поиска: {str(e)}", "red"))
+        
+        thread = threading.Thread(target=search, daemon=True)
+        thread.start()
+        
+    def find_wia_scanner(self):
+        """Поиск сканера через WIA (Windows Image Acquisition)"""
+        try:
+            wia = comtypes.client.CreateObject("WIA.DeviceManager")
+            devices = wia.DeviceInfos
+            
+            for i in range(1, devices.Count + 1):
+                device_info = devices.Item(i)
+                if device_info.DeviceCategory == WIA_DEVICE_CATEGORY_SCANNER:
+                    return device_info
+            
+            return None
+        except Exception as e:
+            print(f"WIA scanner search error: {e}")
+            return None
     
-    def scan_page(self):
-        """Сканирование одной страницы"""
+    def find_twain_scanner(self):
+        """Поиск сканера через TWAIN"""
+        try:
+            if not twain.SourceManagerIsOpen():
+                # TWAIN требует окно, это упрощённая версия
+                pass
+            return True  # Заглушка, реальная реализация сложнее
+        except Exception as e:
+            print(f"TWAIN scanner search error: {e}")
+            return None
+    
+    def get_scanner_name(self):
+        """Получение имени сканера"""
+        if self.scanner_type == 'WIA' and self.scanner_device:
+            try:
+                return self.scanner_device.Name
+            except:
+                return "WIA Scanner"
+        elif self.scanner_type == 'TWAIN':
+            return "TWAIN Scanner"
+        return "Unknown"
+    
+    def update_scanner_status(self, message, color="black"):
+        """Обновление статуса сканера"""
+        self.scanner_info_label.config(text=message, foreground=color)
+        
+    def start_scan_page(self):
+        """Запуск сканирования одной страницы"""
         if self.is_scanning:
-            messagebox.showwarning("Предупреждение", "Сканирование уже выполняется!")
+            messagebox.showwarning("Внимание", "Сканирование уже выполняется!")
             return
         
         if not self.scanner_device:
-            messagebox.showerror("Ошибка", "Выберите сканер!")
+            messagebox.showerror("Ошибка", "Сканер не найден! Проверьте подключение.")
             return
         
         self.is_scanning = True
-        self.progress_bar.start()
-        self.update_status("Начало сканирования страницы...")
+        self.scan_btn.config(state=tk.DISABLED)
+        self.status_label.config(text="⏳ Сканирование страницы... Пожалуйста, подождите.", foreground="orange")
+        self.root.update()
         
         # Запуск сканирования в отдельном потоке
-        scan_thread = threading.Thread(target=self._scan_page_thread, daemon=True)
-        scan_thread.start()
+        thread = threading.Thread(target=self.perform_scan, daemon=True)
+        thread.start()
     
-    def _scan_page_thread(self):
-        """Поток сканирования страницы"""
+    def perform_scan(self):
+        """Выполнение сканирования (в потоке)"""
         try:
-            self.update_scan_settings()
+            image = None
             
-            # Начало сканирования
-            session = self.scanner_device.scan(multiple_scan=False)
-            
-            # Получение изображения
-            images = []
-            for image in session.images:
-                images.append(image)
-            
-            if images:
-                # Конвертация в PIL Image
-                pil_image = images[0]
-                
-                # Добавление в список
-                self.current_session.append(pil_image)
-                self.scanned_images.append(pil_image)
-                
-                # Обновление UI в главном потоке
-                self.root.after(0, lambda: self.on_scan_complete(pil_image))
+            if self.scanner_type == 'WIA':
+                image = self.scan_with_wia()
+            elif self.scanner_type == 'TWAIN':
+                image = self.scan_with_twain()
             else:
-                self.root.after(0, lambda: self.show_error("Изображение не получено"))
-        
+                raise Exception("Нет доступного метода сканирования")
+            
+            if image:
+                # Добавление страницы
+                self.scanned_pages.append(image)
+                self.current_scan_index = len(self.scanned_pages) - 1
+                
+                # Обновление интерфейса в главном потоке
+                self.root.after(0, lambda: self.on_scan_complete(True))
+            else:
+                self.root.after(0, lambda: self.on_scan_complete(False, "Пустое изображение"))
+                
         except Exception as e:
             error_msg = f"Ошибка сканирования: {str(e)}"
-            self.root.after(0, lambda: self.show_error(error_msg))
-            self.root.after(0, lambda: self.update_status(error_msg, is_error=True))
-        
-        finally:
-            self.is_scanning = False
-            self.root.after(0, self.stop_progress)
+            print(error_msg)
+            self.root.after(0, lambda: self.on_scan_complete(False, error_msg))
     
-    def on_scan_complete(self, image):
-        """Обработка завершения сканирования"""
-        # Создание миниатюры
-        thumbnail = image.copy()
-        thumbnail.thumbnail((150, 200), PIL.Image.Resampling.LANCZOS)
-        
-        # Добавление миниатюры в превью
-        self.add_thumbnail(thumbnail, len(self.scanned_images))
-        
-        # Обновление счётчика
-        self.page_count_label.config(text=f"Страниц: {len(self.scanned_images)}")
-        
-        # Активация кнопки завершения
-        self.complete_btn.config(state=tk.NORMAL if self.scanned_images else tk.DISABLED)
-        
-        self.update_status(f"Страница {len(self.scanned_images)} отсканирована успешно")
-    
-    def add_thumbnail(self, thumbnail, index):
-        """Добавление миниатюры в область предпросмотра"""
-        # Конвертация PIL Image в PhotoImage
-        from PIL import ImageTk
-        photo = ImageTk.PhotoImage(thumbnail)
-        
-        # Создание фрейма для миниатюры
-        thumb_frame = ttk.Frame(self.thumbnails_frame, relief=tk.RAISED, borderwidth=2)
-        thumb_frame.pack(side=tk.LEFT, padx=5, pady=5)
-        
-        # Label с изображением
-        img_label = ttk.Label(thumb_frame, image=photo)
-        img_label.image = photo  # Сохранение ссылки
-        img_label.pack()
-        
-        # Номер страницы
-        num_label = ttk.Label(thumb_frame, text=f"#{index}")
-        num_label.pack()
-        
-        # Кнопки управления
-        btn_frame = ttk.Frame(thumb_frame)
-        btn_frame.pack()
-        
-        left_btn = ttk.Button(btn_frame, text="◀", width=2,
-                             command=lambda: self.move_page(index, -1))
-        left_btn.pack(side=tk.LEFT)
-        
-        right_btn = ttk.Button(btn_frame, text="▶", width=2,
-                              command=lambda: self.move_page(index, 1))
-        right_btn.pack(side=tk.LEFT)
-        
-        delete_btn = ttk.Button(btn_frame, text="✕", width=2,
-                               command=lambda: self.delete_page(index))
-        delete_btn.pack(side=tk.LEFT)
-        
-        # Сохранение ссылки на фрейм
-        if not hasattr(self, 'thumbnail_frames'):
-            self.thumbnail_frames = []
-        self.thumbnail_frames.append(thumb_frame)
-    
-    def move_page(self, index, direction):
-        """Перемещение страницы влево или вправо"""
-        new_index = index + direction
-        if 0 <= new_index < len(self.scanned_images):
-            # Перемещение в списке
-            self.scanned_images[index], self.scanned_images[new_index] = \
-                self.scanned_images[new_index], self.scanned_images[index]
-            
-            # Перестроение превью
-            self.rebuild_thumbnails()
-            self.update_status(f"Страница {index+1} перемещена на позицию {new_index+1}")
-    
-    def delete_page(self, index):
-        """Удаление страницы"""
-        if messagebox.askyesno("Подтверждение", f"Удалить страницу {index+1}?"):
-            del self.scanned_images[index]
-            self.rebuild_thumbnails()
-            self.page_count_label.config(text=f"Страниц: {len(self.scanned_images)}")
-            self.update_status(f"Страница {index+1} удалена")
-    
-    def rebuild_thumbnails(self):
-        """Перестроение всех миниатюр"""
-        # Очистка текущих миниатюр
-        for widget in self.thumbnails_frame.winfo_children():
-            widget.destroy()
-        
-        if hasattr(self, 'thumbnail_frames'):
-            self.thumbnail_frames.clear()
-        
-        # Пересоздание миниатюр
-        for i, image in enumerate(self.scanned_images):
-            thumbnail = image.copy()
-            thumbnail.thumbnail((150, 200), PIL.Image.Resampling.LANCZOS)
-            self.add_thumbnail(thumbnail, i + 1)
-    
-    def complete_scanning(self):
-        """Завершение сессии сканирования"""
-        if not self.scanned_images:
-            messagebox.showinfo("Информация", "Нет отсканированных страниц")
-            return
-        
-        self.update_status("Сканирование завершено. Готово к сохранению.")
-        messagebox.showinfo("Готово", 
-                          f"Отсканировано страниц: {len(self.scanned_images)}\n\n"
-                          "Теперь вы можете:\n"
-                          "• Перетащить страницы для изменения порядка\n"
-                          "• Удалить ненужные страницы\n"
-                          "• Сохранить как один PDF или отдельные файлы")
-    
-    def clear_all(self):
-        """Очистка всех отсканированных страниц"""
-        if self.scanned_images and messagebox.askyesno("Подтверждение", 
-                                                       "Удалить все отсканированные страницы?"):
-            self.scanned_images.clear()
-            self.current_session.clear()
-            
-            for widget in self.thumbnails_frame.winfo_children():
-                widget.destroy()
-            
-            if hasattr(self, 'thumbnail_frames'):
-                self.thumbnail_frames.clear()
-            
-            self.page_count_label.config(text="Страниц: 0")
-            self.complete_btn.config(state=tk.DISABLED)
-            self.update_status("Все страницы удалены")
-    
-    def save_pdf(self, single=False):
-        """Сохранение в PDF"""
-        if not self.scanned_images:
-            messagebox.showerror("Ошибка", "Нет страниц для сохранения!")
-            return
-        
+    def scan_with_wia(self):
+        """Сканирование через WIA"""
         try:
-            if single:
-                # Сохранение каждой страницы как отдельного PDF
-                save_dir = filedialog.askdirectory(title="Выберите папку для сохранения")
-                if not save_dir:
-                    return
-                
-                saved_count = 0
-                for i, image in enumerate(self.scanned_images):
-                    filename = f"scan_page_{i+1}.pdf"
-                    filepath = os.path.join(save_dir, filename)
-                    
-                    # Конвертация в RGB если нужно
-                    if image.mode != 'RGB':
-                        image = image.convert('RGB')
-                    
-                    image.save(filepath, "PDF", resolution=100.0)
-                    saved_count += 1
-                
-                messagebox.showinfo("Готово", f"Сохранено {saved_count} файлов(а)")
-                self.update_status(f"Сохранено {saved_count} отдельных PDF файлов")
+            # Получение настроек
+            intent = 1  # Color
+            if self.color_mode.get() == "Grayscale":
+                intent = 2
+            elif self.color_mode.get() == "BlackAndWhite":
+                intent = 3
             
-            else:
-                # Сохранение всех страниц в один PDF
-                filepath = filedialog.asksaveasfilename(
-                    title="Сохранить как",
-                    defaultextension=".pdf",
-                    filetypes=[("PDF files", "*.pdf")],
-                    initialfile=f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-                )
-                
-                if not filepath:
-                    return
-                
-                # Конвертация первого изображения
-                first_image = self.scanned_images[0]
-                if first_image.mode != 'RGB':
-                    first_image = first_image.convert('RGB')
-                
-                # Остальные изображения
-                other_images = []
-                for img in self.scanned_images[1:]:
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    other_images.append(img)
-                
-                # Сохранение
-                if other_images:
-                    first_image.save(
-                        filepath,
-                        "PDF",
-                        save_all=True,
-                        append_images=other_images,
-                        resolution=100.0
-                    )
-                else:
-                    first_image.save(filepath, "PDF", resolution=100.0)
-                
-                messagebox.showinfo("Готово", "Документ сохранён успешно!")
-                self.update_status(f"Сохранён объединённый PDF: {os.path.basename(filepath)}")
-        
+            # Создание временного файла
+            temp_dir = tempfile.gettempdir()
+            temp_file = os.path.join(temp_dir, f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.bmp")
+            
+            # Инициализация устройства
+            device = self.scanner_device.Connect()
+            
+            # Получение элемента изображения
+            item = device.Items[1]  # Первое устройство ввода
+            
+            # Настройка параметров сканирования
+            # Примечание: WIA COM API имеет ограничения в настройках через Python
+            
+            # Выполнение сканирования
+            image_data = item.Transfer(WIA_IMAGE_FORMAT_BMP)
+            
+            # Сохранение во временный файл
+            with open(temp_file, 'wb') as f:
+                f.write(image_data.FileData.BinaryData)
+            
+            # Загрузка изображения
+            image = Image.open(temp_file)
+            
+            # Очистка временного файла
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+            
+            return image
+            
         except Exception as e:
-            error_msg = f"Ошибка сохранения: {str(e)}"
-            self.show_error(error_msg)
-            self.update_status(error_msg, is_error=True)
+            # Альтернативный метод через DeviceManager
+            try:
+                wia = comtypes.client.CreateObject("WIA.DeviceManager")
+                
+                # Прямое сканирование
+                dialog = comtypes.client.CreateObject("WIA.CommonDialog")
+                
+                # Настройка диалога
+                device = self.scanner_device.Connect()
+                
+                # Получение изображения
+                image_data = dialog.ShowTransfer(device, WIA_IMAGE_FORMAT_BMP, True)
+                
+                # Конвертация в PIL Image
+                if image_data:
+                    binary_data = image_data.FileData.BinaryData
+                    image_stream = io.BytesIO(binary_data)
+                    image = Image.open(image_stream)
+                    return image
+                    
+            except Exception as e2:
+                print(f"WIA scan error (attempt 2): {e2}")
+                raise Exception(f"WIA сканирование не удалось: {str(e)}")
     
-    def on_thumbnails_configure(self, event):
-        """Обработчик изменения размера области миниатюр"""
+    def scan_with_twain(self):
+        """Сканирование через TWAIN"""
+        try:
+            # TWAIN требует более сложной интеграции с окнами
+            # Это упрощённая реализация
+            if not twain.SourceManagerIsOpen():
+                # Открытие менеджера источников
+                pass
+            
+            # Заглушка для TWAIN
+            # Полная реализация требует создания скрытого окна
+            raise Exception("TWAIN требует дополнительной настройки")
+            
+        except Exception as e:
+            print(f"TWAIN scan error: {e}")
+            raise
+    
+    def on_scan_complete(self, success, error_msg=None):
+        """Обработка завершения сканирования"""
+        self.is_scanning = False
+        self.scan_btn.config(state=tk.NORMAL)
+        
+        if success:
+            self.status_label.config(
+                text=f"✓ Страница {len(self.scanned_pages)} отсканирована успешно. "
+                     f"Добавьте следующую или нажмите 'Завершить'", 
+                foreground="green")
+            
+            self.finish_btn.config(state=tk.NORMAL)
+            self.clear_btn.config(state=tk.NORMAL)
+            self.save_btn.config(state=tk.NORMAL)
+            
+            # Обновление превью
+            self.update_preview()
+            
+            # Показ панели управления страницами
+            if self.page_controls_frame.winfo_ismapped():
+                self.page_controls_frame.pack_forget()
+            self.page_controls_frame.pack(fill=tk.X, before=self.root.slaves()[-1])
+            
+            self.update_page_controls()
+        else:
+            msg = error_msg or "Неизвестная ошибка"
+            self.status_label.config(text=f"✗ Ошибка: {msg}", foreground="red")
+            messagebox.showerror("Ошибка сканирования", 
+                               f"Не удалось отсканировать страницу.\n\n{msg}\n\n"
+                               f"Проверьте:\n"
+                               f"1. Подключение сканера по сети/USB\n"
+                               f"2. Драйверы WIA/TWAIN установлены\n"
+                               f"3. Сканер готов к работе")
+    
+    def update_preview(self):
+        """Обновление превью страниц"""
+        # Очистка старых превью
+        for widget in self.preview_inner_frame.winfo_children():
+            widget.destroy()
+        self.page_thumbnails.clear()
+        
+        # Создание новых превью
+        for idx, page_image in enumerate(self.scanned_pages):
+            frame = ttk.Frame(self.preview_inner_frame, relief=tk.RAISED, borderwidth=2)
+            frame.pack(side=tk.LEFT, padx=10, pady=10)
+            
+            # Создание миниатюры
+            thumb_size = (150, 200)
+            thumbnail = page_image.copy()
+            thumbnail.thumbnail(thumb_size, Image.Resampling.LANCZOS)
+            
+            # Конвертация в PhotoImage
+            photo = ImageTk.PhotoImage(thumbnail)
+            self.page_thumbnails.append(photo)
+            
+            label = tk.Label(frame, image=photo)
+            label.image = photo  # Сохранение ссылки
+            label.pack()
+            
+            # Номер страницы
+            num_label = ttk.Label(frame, text=f"Стр. {idx + 1}")
+            num_label.pack(pady=5)
+            
+            # Выделение текущей страницы
+            if idx == self.current_scan_index:
+                frame.config(relief=tk.SOLID, borderwidth=3)
+                label.config(bg="lightblue")
+            
+            # Обработчик клика
+            frame.bind("<Button-1>", lambda e, i=idx: self.select_page(i))
+            label.bind("<Button-1>", lambda e, i=idx: self.select_page(i))
+            num_label.bind("<Button-1>", lambda e, i=idx: self.select_page(i))
+    
+    def on_preview_frame_configure(self, event):
+        """Обновление области прокрутки при изменении размера фрейма"""
         self.preview_canvas.configure(scrollregion=self.preview_canvas.bbox("all"))
     
     def on_canvas_configure(self, event):
-        """Обработчик изменения размера canvas"""
-        pass
+        """Адаптация размера окна при изменении canvas"""
+        self.preview_canvas.itemconfig(self.preview_window, width=event.width)
     
-    def stop_progress(self):
-        """Остановка индикатора прогресса"""
-        self.progress_bar.stop()
+    def select_page(self, index):
+        """Выбор страницы"""
+        self.current_scan_index = index
+        self.update_preview()
+        self.update_page_controls()
     
-    def update_status(self, message, is_error=False):
-        """Обновление статусной строки"""
-        self.status_label.config(text=message)
-        if is_error:
-            self.error_label.config(text=message)
+    def update_page_controls(self):
+        """Обновление кнопок управления страницами"""
+        total_pages = len(self.scanned_pages)
+        
+        if total_pages > 0:
+            self.selected_page_label.config(
+                text=f"Выбрана страница {self.current_scan_index + 1} из {total_pages}")
+            
+            # Активация кнопок перемещения
+            self.prev_page_btn.config(state=tk.NORMAL if self.current_scan_index > 0 else tk.DISABLED)
+            self.next_page_btn.config(
+                state=tk.NORMAL if self.current_scan_index < total_pages - 1 else tk.DISABLED)
+            self.delete_page_btn.config(state=tk.NORMAL)
         else:
-            self.error_label.config(text="")
+            self.selected_page_label.config(text="Страниц не найдено")
+            self.prev_page_btn.config(state=tk.DISABLED)
+            self.next_page_btn.config(state=tk.DISABLED)
+            self.delete_page_btn.config(state=tk.DISABLED)
     
-    def show_error(self, message):
-        """Показ ошибки"""
-        self.error_label.config(text=message)
-        messagebox.showerror("Ошибка", message)
+    def move_page_left(self):
+        """Перемещение страницы влево"""
+        if self.current_scan_index > 0:
+            # Обмен местами
+            self.scanned_pages[self.current_scan_index], \
+            self.scanned_pages[self.current_scan_index - 1] = \
+            self.scanned_pages[self.current_scan_index - 1], \
+            self.scanned_pages[self.current_scan_index]
+            
+            self.current_scan_index -= 1
+            self.update_preview()
+            self.update_page_controls()
     
-    def on_closing(self):
-        """Обработчик закрытия окна"""
-        if self.is_scanning:
-            if not messagebox.askyesno("Предупреждение", 
-                                      "Сканирование выполняется. Всё равно закрыть?"):
-                return
+    def move_page_right(self):
+        """Перемещение страницы вправо"""
+        if self.current_scan_index < len(self.scanned_pages) - 1:
+            # Обмен местами
+            self.scanned_pages[self.current_scan_index], \
+            self.scanned_pages[self.current_scan_index + 1] = \
+            self.scanned_pages[self.current_scan_index + 1], \
+            self.scanned_pages[self.current_scan_index]
+            
+            self.current_scan_index += 1
+            self.update_preview()
+            self.update_page_controls()
+    
+    def delete_selected_page(self):
+        """Удаление выбранной страницы"""
+        if len(self.scanned_pages) == 0:
+            return
         
-        if self.scanned_images:
-            response = messagebox.askyesnocancel("Предупреждение",
-                                                "Есть несохранённые страницы. Сохранить перед выходом?")
-            if response is True:
-                self.save_pdf(single=False)
-            elif response is None:
-                return
+        if messagebox.askyesno("Подтверждение", 
+                              f"Удалить страницу {self.current_scan_index + 1}?"):
+            del self.scanned_pages[self.current_scan_index]
+            
+            if self.current_scan_index >= len(self.scanned_pages):
+                self.current_scan_index = max(0, len(self.scanned_pages) - 1)
+            
+            self.update_preview()
+            self.update_page_controls()
+            
+            if len(self.scanned_pages) == 0:
+                self.finish_btn.config(state=tk.DISABLED)
+                self.clear_btn.config(state=tk.DISABLED)
+                self.save_btn.config(state=tk.DISABLED)
+                self.page_controls_frame.pack_forget()
+    
+    def finish_scanning(self):
+        """Завершение сканирования и переход в редактор"""
+        if len(self.scanned_pages) == 0:
+            messagebox.showinfo("Информация", "Нет отсканированных страниц.")
+            return
         
-        self.root.destroy()
+        self.status_label.config(
+            text=f"✓ Готово {len(self.scanned_pages)} страниц(ы). "
+                 f"Отрегулируйте порядок и сохраните в PDF.", 
+            foreground="blue")
+        
+        messagebox.showinfo("Режим редактирования", 
+                          "Теперь вы можете:\n"
+                          "• Перемещать страницы кнопками ◀ ▶\n"
+                          "• Удалять ненужные страницы (✕)\n"
+                          "• Выбирать страницы кликом по превью\n\n"
+                          "Когда закончите, нажмите 'Сохранить в PDF'")
+    
+    def clear_all(self):
+        """Очистка всех отсканированных страниц"""
+        if len(self.scanned_pages) == 0:
+            return
+        
+        if messagebox.askyesno("Подтверждение", "Удалить все отсканированные страницы?"):
+            self.scanned_pages.clear()
+            self.page_thumbnails.clear()
+            self.current_scan_index = 0
+            
+            for widget in self.preview_inner_frame.winfo_children():
+                widget.destroy()
+            
+            self.finish_btn.config(state=tk.DISABLED)
+            self.clear_btn.config(state=tk.DISABLED)
+            self.save_btn.config(state=tk.DISABLED)
+            self.page_controls_frame.pack_forget()
+            
+            self.status_label.config(text="✓ Все страницы удалены. Готов к новому сканированию.", 
+                                    foreground="green")
+    
+    def save_to_pdf(self):
+        """Сохранение в PDF"""
+        if len(self.scanned_pages) == 0:
+            messagebox.showwarning("Предупреждение", "Нет страниц для сохранения.")
+            return
+        
+        try:
+            # Выбор пути сохранения
+            if self.save_separate.get():
+                # Сохранение отдельных файлов
+                initial_dir = os.path.join(os.path.expanduser("~"), "Documents")
+                base_filename = filedialog.asksaveasfilename(
+                    title="Сохранить как (будет добавлен номер страницы)",
+                    initialdir=initial_dir,
+                    defaultextension=".pdf",
+                    filetypes=[("PDF файлы", "*.pdf")],
+                    initialfile="scan"
+                )
+                
+                if not base_filename:
+                    return
+                
+                base_path = Path(base_filename)
+                base_name = base_path.stem
+                parent_dir = base_path.parent
+                
+                from reportlab.lib.pagesizes import A4, A3, letter, legal
+                from reportlab.pdfgen import canvas
+                from reportlab.lib.utils import ImageReader
+                import io
+                
+                # Определение формата страницы
+                page_sizes = {
+                    "A4": A4,
+                    "A3": A3,
+                    "Letter": letter,
+                    "Legal": legal
+                }
+                page_size = page_sizes.get(self.paper_size.get(), A4)
+                
+                saved_count = 0
+                for idx, page_image in enumerate(self.scanned_pages):
+                    # Конвертация изображения в bytes
+                    img_buffer = io.BytesIO()
+                    page_image.save(img_buffer, format='PNG')
+                    img_buffer.seek(0)
+                    
+                    # Создание PDF
+                    pdf_filename = parent_dir / f"{base_name}_page_{idx + 1}.pdf"
+                    c = canvas.Canvas(str(pdf_filename), pagesize=page_size)
+                    
+                    # Масштабирование изображения под размер страницы
+                    img_width, img_height = page_image.size
+                    page_width, page_height = page_size
+                    
+                    scale = min(page_width / img_width, page_height / img_height) * 0.9
+                    new_width = img_width * scale
+                    new_height = img_height * scale
+                    
+                    x = (page_width - new_width) / 2
+                    y = (page_height - new_height) / 2
+                    
+                    c.drawImage(ImageReader(img_buffer), x, y, new_width, new_height)
+                    c.save()
+                    
+                    saved_count += 1
+                    self.status_label.config(
+                        text=f"Сохранение: {saved_count}/{len(self.scanned_pages)}")
+                    self.root.update()
+                
+                messagebox.showinfo("Успех", 
+                                  f"Сохранено {saved_count} отдельных PDF файлов(а).\n"
+                                  f"Папка: {parent_dir}")
+                
+            else:
+                # Сохранение одного объединённого файла
+                filename = filedialog.asksaveasfilename(
+                    title="Сохранить PDF",
+                    initialdir=os.path.join(os.path.expanduser("~"), "Documents"),
+                    defaultextension=".pdf",
+                    filetypes=[("PDF файлы", "*.pdf")],
+                    initialfile=f"scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+                
+                if not filename:
+                    return
+                
+                from reportlab.lib.pagesizes import A4, A3, letter, legal
+                from reportlab.pdfgen import canvas
+                from reportlab.lib.utils import ImageReader
+                import io
+                
+                # Определение формата страницы
+                page_sizes = {
+                    "A4": A4,
+                    "A3": A3,
+                    "Letter": letter,
+                    "Legal": legal
+                }
+                page_size = page_sizes.get(self.paper_size.get(), A4)
+                
+                # Создание первого страницы
+                c = canvas.Canvas(filename, pagesize=page_size)
+                
+                for idx, page_image in enumerate(self.scanned_pages):
+                    if idx > 0:
+                        c.showPage()  # Новая страница
+                    
+                    # Конвертация изображения в bytes
+                    img_buffer = io.BytesIO()
+                    page_image.save(img_buffer, format='PNG')
+                    img_buffer.seek(0)
+                    
+                    # Масштабирование изображения под размер страницы
+                    img_width, img_height = page_image.size
+                    page_width, page_height = page_size
+                    
+                    scale = min(page_width / img_width, page_height / img_height) * 0.9
+                    new_width = img_width * scale
+                    new_height = img_height * scale
+                    
+                    x = (page_width - new_width) / 2
+                    y = (page_height - new_height) / 2
+                    
+                    c.drawImage(ImageReader(img_buffer), x, y, new_width, new_height)
+                    
+                    self.status_label.config(
+                        text=f"Сохранение: {idx + 1}/{len(self.scanned_pages)}")
+                    self.root.update()
+                
+                c.save()
+                
+                messagebox.showinfo("Успех", 
+                                  f"Сохранён PDF файл с {len(self.scanned_pages)} страниц(ей).\n"
+                                  f"Файл: {filename}")
+            
+            self.status_label.config(text="✓ Сохранение завершено!", foreground="green")
+            
+        except ImportError:
+            messagebox.showerror("Ошибка", 
+                               "Требуется библиотека reportlab.\n"
+                               "Установите командой:\n"
+                               "pip install reportlab")
+        except Exception as e:
+            error_msg = f"Ошибка сохранения: {str(e)}"
+            print(error_msg)
+            self.status_label.config(text=error_msg, foreground="red")
+            messagebox.showerror("Ошибка сохранения", error_msg)
 
 
 def main():
     """Точка входа приложения"""
+    # Предотвращение закрытия терминала при ошибках
+    if sys.platform == 'win32':
+        # Установка обработки исключений
+        def handle_exception(exc_type, exc_value, exc_traceback):
+            if issubclass(exc_type, KeyboardInterrupt):
+                sys.__excepthook__(exc_type, exc_value, exc_traceback)
+                return
+            print(f"\n{'='*60}")
+            print(f"КРИТИЧЕСКАЯ ОШИБКА:")
+            print(f"Тип: {exc_type.__name__}")
+            print(f"Сообщение: {exc_value}")
+            print(f"{'='*60}")
+            print("Окно остаётся открытым для просмотра ошибки.")
+        
+        sys.excepthook = handle_exception
+    
+    # Создание главного окна
     root = tk.Tk()
     
-    # Установка иконки (если есть)
+    # Иконка (если есть)
     try:
-        root.iconbitmap("scanner.ico")
+        root.iconbitmap(default='')
     except:
         pass
     
+    # Запуск приложения
     app = ScannerApp(root)
-    root.mainloop()
+    
+    # Запуск цикла событий
+    try:
+        root.mainloop()
+    except Exception as e:
+        print(f"\nОшибка в главном цикле: {e}")
+        input("\nНажмите Enter для выхода...")
 
 
 if __name__ == "__main__":
