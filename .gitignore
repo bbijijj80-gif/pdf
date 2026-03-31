@@ -1,0 +1,77 @@
+```gitignore
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.py~
+*.py.class
+.Python
+env/
+venv/
+.venv/
+.venv.bak/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+*.pot
+*.po
+*~
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# Distribution / packaging
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# System
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+*.env.*
+
+# Coverage
+coverage/
+htmlcov/
+
+# Build results
+build/
+.sass-cache/
+generated/
+*.so
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+```
+
+Wait, let me reconsider. The changes only include source/config files (.md, .txt, .py) and no build artifacts, dependencies, or temp files. According to rule #6, I should output nothing.
+
+```gitignore
+
+```
